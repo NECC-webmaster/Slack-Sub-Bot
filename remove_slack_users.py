@@ -10,18 +10,21 @@ from slack_sdk.errors import SlackApiError
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
+SHEET_TAB_NAME = os.environ.get("SHEET_TAB_NAME")
 GCP_JSON_STR = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 
 def validate_env():
     """Ensure all required environment variables are set."""
     missing = []
-    for var in [
+    required_vars = [
         "SLACK_BOT_TOKEN",
         "SLACK_CHANNEL_ID",
         "SPREADSHEET_ID",
+        "SHEET_TAB_NAME",
         "GOOGLE_SERVICE_ACCOUNT_JSON",
-    ]:
+    ]
+    for var in required_vars:
         if not os.environ.get(var):
             missing.append(var)
     if missing:
@@ -30,8 +33,8 @@ def validate_env():
 
 
 def get_target_emails_from_sheets() -> set:
-    """Fetch emails from the first column of the specified Google Sheet."""
-    print("Connecting to Google Sheets...")
+    """Fetch emails from Column A of a specific worksheet tab, skipping cell A1 (header)."""
+    print(f"Connecting to Google Sheets (Tab: '{SHEET_TAB_NAME}')...")
     creds_info = json.loads(GCP_JSON_STR)
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     credentials = Credentials.from_service_account_info(
@@ -39,17 +42,32 @@ def get_target_emails_from_sheets() -> set:
     )
 
     client = gspread.authorize(credentials)
-    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+    
+    try:
+        # Access the specific tab by name
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        worksheet = spreadsheet.worksheet(SHEET_TAB_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"Error: Worksheet tab named '{SHEET_TAB_NAME}' was not found.")
+        sys.exit(1)
 
-    # Fetches all values from the first column (assumes column 1 has emails)
-    emails = sheet.col_values(1)
+    # Fetches all values from Column A
+    column_a_values = worksheet.col_values(1)
 
-    # Normalize emails (lowercase and strip whitespace), ignoring header if any
+    if not column_a_values:
+        print("Column A is completely empty.")
+        return set()
+
+    # Skip cell A1 (header) by taking column_a_values[1:]
+    data_rows = column_a_values[1:]
+
+    # Normalize emails (lowercase and strip whitespace), keeping valid emails
     cleaned_emails = {
-        email.strip().lower() for email in emails if "@" in str(email)
+        email.strip().lower() for email in data_rows if "@" in str(email)
     }
+    
     print(
-        f"Retrieved {len(cleaned_emails)} unique target emails from Google Sheets."
+        f"Retrieved {len(cleaned_emails)} target emails from Column A (excluding header A1)."
     )
     return cleaned_emails
 
@@ -58,7 +76,6 @@ def remove_matching_members(slack_client: WebClient, target_emails: set):
     """Fetch private channel members, check emails, and kick matching members."""
     print(f"Fetching members for channel {SLACK_CHANNEL_ID}...")
     try:
-        # Get all member IDs in the channel
         members_response = slack_client.conversations_members(
             channel=SLACK_CHANNEL_ID
         )
@@ -72,7 +89,6 @@ def remove_matching_members(slack_client: WebClient, target_emails: set):
     removed_count = 0
     for user_id in member_ids:
         try:
-            # Lookup user details
             user_info = slack_client.users_info(user=user_id)
             user_data = user_info.get("user", {})
 
@@ -98,20 +114,18 @@ def remove_matching_members(slack_client: WebClient, target_emails: set):
             error_code = e.response.get("error", "unknown_error")
             print(f"Failed to process/remove user {user_id}: {error_code}")
 
-    print(
-        f"\nProcess complete. Total members removed: {removed_count}"
-    )
+    print(f"\nProcess complete. Total members removed: {removed_count}")
 
 
 def main():
     validate_env()
     slack_client = WebClient(token=SLACK_BOT_TOKEN)
 
-    # 1. Get emails from Google Sheets
+    # 1. Get emails from specified Google Sheet tab
     target_emails = get_target_emails_from_sheets()
 
     if not target_emails:
-        print("No valid emails found in Google Sheet. Exiting.")
+        print("No valid emails found in specified tab. Exiting.")
         return
 
     # 2. Check Slack members and kick matches
