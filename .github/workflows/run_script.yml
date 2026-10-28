@@ -2,8 +2,6 @@ name: Remove Specified Slack Channel Members
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'
 
 jobs:
   run-cleanup:
